@@ -1,0 +1,45 @@
+{
+  "name": "zhiti-atlas-ai",
+  "version": "1.0.0",
+  "description": "知体 ATLAS AI：可运行的三维人体结构探索与课程学习应用",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --host 0.0.0.0 --port 3016",
+    "dev:server": "node --watch server/index.mjs",
+    "build": "vite build",
+    "build:vercel": "vite build",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "validate:model-training": "node scripts/validate-model-training.mjs",
+    "verify:live": "node scripts/verify-live.mjs",
+    "start": "node server/index.mjs",
+    "launch": "node scripts/launch.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "1.31.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "three": "^0.159.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/three": "^0.159.0",
+    "@vitejs/plugin-react": "6.0.2",
+    "meshoptimizer": "^1.2.0",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
+  },
+  "type": "module",
+  "license": "MIT"
+}
