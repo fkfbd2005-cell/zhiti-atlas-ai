@@ -1,3 +1,5 @@
+import {anatomicalName} from './atlas-index.mjs';
+import {MODEL_TRAINING_QUESTIONS} from './model-training';
 import type {Atlas,SystemId} from './anatomy';
 
 export type Action =
@@ -118,12 +120,18 @@ export function resolveFreeClickConcept(atlas:Atlas,partId:string){
 }
 export function resolveConcept(atlas:Atlas,query:string){
  const q=query.trim().toLowerCase().replace(/\s+/g,' ');if(!q)return undefined;
- const local=CORE_CONCEPTS.find(c=>c.id.toLowerCase()===q||c.zh.toLowerCase()===q||c.en.toLowerCase()===q||c.synonyms.some(s=>s.toLowerCase()===q))
-  ??CORE_CONCEPTS.find(c=>[c.zh,c.en,...c.synonyms].some(s=>s.toLowerCase().includes(q)||q.includes(s.toLowerCase())));
- if(local&&atlas.concepts.some(c=>c.id===local.id))return local;
- const raw=atlas.concepts.find(c=>c.id.toLowerCase()===q||c.name.toLowerCase()===q)??atlas.concepts.find(c=>c.name.toLowerCase().includes(q));
+ const exact=CORE_CONCEPTS.find(c=>[c.id,c.zh,c.en,...c.synonyms].some(term=>term.toLowerCase()===q));
+ if(exact&&atlas.concepts.some(c=>c.id===exact.id))return exact;
+ const matches=(c:Atlas['concepts'][number])=>[c.id,c.name,anatomicalName(c.name)].some(term=>term.toLowerCase()===q);
+ let raw=atlas.concepts.find(matches);
+ if(!raw){
+  const local=CORE_CONCEPTS.find(c=>[c.zh,c.en,...c.synonyms].some(term=>term.toLowerCase().includes(q)));
+  if(local&&atlas.concepts.some(c=>c.id===local.id))return local;
+  raw=atlas.concepts.find(c=>[c.name,anatomicalName(c.name)].some(term=>term.toLowerCase().includes(q)));
+ }
  if(!raw)return undefined;const part=atlas.parts.find(p=>raw.elements.includes(p.id));
- return {id:raw.id,zh:raw.name,en:raw.name,system:part?.system??'connective',synonyms:[],summary:'该结构来自 BodyParts3D 原始英文概念索引，尚未进入核心中文审校词表。',source:'atlas'} satisfies ConceptEntry;
+ const lesson=MODEL_TRAINING_QUESTIONS.find(item=>item.conceptId===raw.id);
+ return {id:raw.id,zh:anatomicalName(raw.name),en:raw.name,system:part?.system??'connective',synonyms:[],summary:lesson?.explanation??'该结构对应 BodyParts3D 解剖模型。',source:lesson?.source??'atlas'} satisfies ConceptEntry;
 }
 
 export function validateActions(atlas:Atlas,actions:Action[]){

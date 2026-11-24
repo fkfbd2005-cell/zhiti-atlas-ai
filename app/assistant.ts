@@ -1,7 +1,9 @@
+import {assistantConcepts,anatomicalName} from './atlas-index.mjs';
 import type {Atlas,SystemId} from './anatomy';
 import {SYSTEMS} from './anatomy';
-import {LESSONS,type Action,type LessonId} from './content';
-export interface AssistantReply {mode:'demo'|'live'|'off';answer:string;actions:Action[];citations:{title:string;url:string}[];limitations:string[];error?:string}
+import {SOURCES,LESSONS,type Action,type LessonId} from './content';
+export interface DialogueTurn {question:string;answer:string}
+export interface AssistantReply {contextual?:boolean;mode:'demo'|'live'|'off';answer:string;actions:Action[];citations:{title:string;url:string}[];limitations:string[];error?:string}
 export interface AIConfig {provider:string;apiKey:string;baseUrl:string;model:string}
 export const AI_PRESETS=[
  {id:'aliyun',label:'阿里云百炼',baseUrl:'https://dashscope.aliyuncs.com/compatible-mode/v1',model:'qwen-plus'},
@@ -9,7 +11,7 @@ export const AI_PRESETS=[
  {id:'custom',label:'其他兼容接口',baseUrl:'',model:''},
 ] as const;
 export const AI_SESSION_KEY='zhiti-ai-config-v1';
-const SYSTEM_PROMPT=`你是“知体 · ATLAS AI”的中文人体解剖学教学助手。只回答人体结构、器官功能、解剖学知识、当前课程内容与本项目操作。对任何无关话题礼貌拒绝。不得提供疾病诊断、症状判断、治疗方案、处方或个体医疗建议。只能返回严格 JSON：{"mode":"live","answer":"...","actions":[],"citations":[],"limitations":[]}。允许动作仅为 focus、highlight、showInfo、setVisibility、compare、setOpacity、selectSystem、resetView、startLesson；最多5个动作；只能使用所给上下文中的 conceptId、lessonId 和系统名；不得输出代码、HTML、文件操作或其他工具调用。`;
+const SYSTEM_PROMPT=`你是“知体 · ATLAS AI”的中文人体解剖学教学助手。只回答人体结构、器官功能、解剖学知识、当前课程内容与本项目操作。对任何无关话题礼貌拒绝。不得提供疾病诊断、症状判断、治疗方案、处方或个体医疗建议。只能返回严格 JSON：{"mode":"live","answer":"...","actions":[],"citations":[],"limitations":[]}。允许动作仅为 focus、highlight、showInfo、setVisibility、compare、setOpacity、selectSystem、resetView、startLesson；最多5个动作；只能使用所给上下文中的 conceptId、lessonId 和系统名；不得输出代码、HTML、文件操作或其他工具调用。回答涉及课程知识时，按需从上下文的 sources 引用相关条目（title、url），没有适用来源时留空。`;
 const TOPIC_RE=/解剖|人体|身体|器官|骨|肌|心|肺|脑|肝|肾|胃|肠|血管|动脉|静脉|神经|呼吸|循环|泌尿|生殖|内分泌|淋巴|皮肤|关节|韧带|课程|模型|结构|部位|定位|聚焦|显示|隐藏|透明|旋转|复位|拆解|atlas|anatom|organ|heart|lung|brain|bone|muscle|artery|vein|nerve|kidney|liver/i;
 const MEDICAL_ADVICE_RE=/诊断|确诊|处方|治疗|用药|药物|剂量|我是不是得了|症状|疼|痛|疾病|治病|手术建议/;
 export function classifyAssistantTopic(message:string){if(MEDICAL_ADVICE_RE.test(message))return'medical' as const;if(!TOPIC_RE.test(message))return'off-topic' as const;return'anatomy' as const;}
@@ -31,9 +33,9 @@ function sanitizeClientReply(value:unknown,atlas:Atlas):AssistantReply{
  const citations=(Array.isArray(raw.citations)?raw.citations:[]).slice(0,4).flatMap(item=>{if(!item||typeof item!=='object')return[];const x=item as Record<string,unknown>;if(typeof x.title!=='string'||typeof x.url!=='string')return[];try{const url=new URL(x.url);return ['http:','https:'].includes(url.protocol)?[{title:x.title.slice(0,120),url:url.toString()}]:[];}catch{return[];}});
  return{mode:'live',answer:typeof raw.answer==='string'?raw.answer.slice(0,1600):'没有可显示的回答。',actions,citations,limitations:(Array.isArray(raw.limitations)?raw.limitations:[]).filter((x):x is string=>typeof x==='string').map(x=>x.slice(0,240)).slice(0,4)};
 }
-async function callCompatibleAPI(message:string,config:AIConfig,atlas?:Atlas){
- const context=atlas?{lessons:LESSONS.map(l=>l.id),concepts:atlas.concepts.slice(0,180).map(c=>({id:c.id,name:c.name})),systems:SYSTEMS.map(s=>s.id)}:{};const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
- try{const response=await fetch(endpoint(config.baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify({model:config.model,messages:[{role:'system',content:SYSTEM_PROMPT},{role:'system',content:`可用项目上下文：${JSON.stringify(context)}`},{role:'user',content:message}],temperature:.2,max_tokens:900}),signal:controller.signal});if(!response.ok)throw new Error(response.status===401?'API Key 无效或无权访问该模型。':`接口返回 ${response.status}。`);const payload=await response.json();const text=payload?.choices?.[0]?.message?.content;if(typeof text!=='string')throw new Error('接口返回格式不兼容。');return atlas?sanitizeClientReply(JSON.parse(stripFence(text)),atlas):true;}finally{clearTimeout(timer);}
+async function callCompatibleAPI(message:string,config:AIConfig,atlas?:Atlas,history:DialogueTurn[]=[]){
+ const context=atlas?{lessons:LESSONS.map(l=>l.id),concepts:assistantConcepts(atlas.concepts,message,history.slice(-2).map(turn=>turn.question+" "+turn.answer).join(" ")),sources:Object.values(SOURCES).map(({title,url})=>({title,url})),systems:SYSTEMS.map(s=>s.id)}:{};const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
+ try{const response=await fetch(endpoint(config.baseUrl),{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${config.apiKey}`},body:JSON.stringify({model:config.model,messages:[{role:'system',content:SYSTEM_PROMPT},{role:'system',content:`可用项目上下文：${JSON.stringify(context)}`},...history.slice(-4).flatMap(turn=>[{role:'user',content:turn.question.slice(0,1200)},{role:'assistant',content:turn.answer.slice(0,1600)}]),{role:'user',content:message}],temperature:.2,max_tokens:900}),signal:controller.signal});if(!response.ok)throw new Error(response.status===401?'API Key 无效或无权访问该模型。':`接口返回 ${response.status}。`);const payload=await response.json();const text=payload?.choices?.[0]?.message?.content;if(typeof text!=='string')throw new Error('接口返回格式不兼容。');return atlas?sanitizeClientReply(JSON.parse(stripFence(text)),atlas):true;}finally{clearTimeout(timer);}
 }
 export async function testAIConfig(config:AIConfig){await callCompatibleAPI('请仅返回 JSON：{"mode":"live","answer":"连接成功","actions":[],"citations":[],"limitations":[]}',config);return true;}
 const base=(answer:string,actions:Action[]=[],limitations:string[]=[]):AssistantReply=>({mode:'demo',answer,actions,citations:[],limitations});
@@ -61,8 +63,8 @@ export function localDemo(message:string):AssistantReply{
  if(/脑|大脑/.test(q))return base('已定位脑。',[{type:'focus',conceptId:'FMA50801'}]);
  return base('演示模式支持心脏、主动脉、肺、气管、支气管、股骨、颅骨、脑、骨骼系统、三门课程与视图重置。开放式问答需配置实时 AI。',[],['本回答来自前端规则降级，不是实时大模型。']);
 }
-export async function askAssistant(message:string,config?:AIConfig|null,atlas?:Atlas|null):Promise<AssistantReply>{
- const topic=classifyAssistantTopic(message);if(topic==='medical')return{...base('知体只提供人体解剖学教育信息，不提供疾病诊断、症状判断或治疗建议。若有健康问题，请咨询具备资质的医疗专业人员。',[],['不提供个体医疗决策。']),mode:config?'live':'demo'};if(topic==='off-topic')return{...base('我是人体解剖学教学助手，只能回答人体结构、器官功能、解剖课程和知体项目操作相关问题。我们可以继续学习心脏、肺、骨骼或其他人体结构。'),mode:config?'live':'demo'};
+export async function askAssistant(message:string,config?:AIConfig|null,atlas?:Atlas|null,history:DialogueTurn[]=[]):Promise<AssistantReply>{
+ const topic=classifyAssistantTopic(message);if(topic==='medical')return{...base('知体只提供人体解剖学教育信息，不提供疾病诊断、症状判断或治疗建议。若有健康问题，请咨询具备资质的医疗专业人员。',[],['不提供个体医疗决策。']),mode:config?'live':'demo'};if(topic==='off-topic' && !(config && history.length && /^(?:那|那么)?(?:它们|它|两者|二者|这两者|这个部位)(?:的)?(?:有什么区别|有什么不同|有何不同|有何区别|有什么作用|在哪里|位于哪里|有什么特点|呢)[呢吗？?。\s]*$/.test(message.trim())) && !(atlas && atlas.concepts.some(c=>[c.name,c.id,anatomicalName(c.name)].some(term=>message.trim().toLowerCase()===term.toLowerCase()))))return{...base('我是人体解剖学教学助手，只能回答人体结构、器官功能、解剖课程和知体项目操作相关问题。我们可以继续学习心脏、肺、骨骼或其他人体结构。'),mode:config?'live':'demo'};
  if(!config||!atlas)return localDemo(message);
- try{return await callCompatibleAPI(message,config,atlas) as AssistantReply;}catch(error){const fallback=localDemo(message);return{...fallback,error:error instanceof Error?error.message:'实时 AI 连接失败。',limitations:[`实时连接失败：${error instanceof Error?error.message:'未知错误'}，已自动使用离线演示。`,...fallback.limitations]};}
+ try{return {...await callCompatibleAPI(message,config,atlas,history) as AssistantReply,contextual:true};}catch(error){const fallback=localDemo(message);return{...fallback,error:error instanceof Error?error.message:'实时 AI 连接失败。',limitations:[`实时连接失败：${error instanceof Error?error.message:'未知错误'}，已自动使用离线演示。`,...fallback.limitations]};}
 }

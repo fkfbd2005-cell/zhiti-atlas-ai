@@ -1,3 +1,4 @@
+import {anatomicalName} from './atlas-index.mjs';
 import {useEffect,useRef} from 'react';
 import * as T from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
@@ -8,8 +9,10 @@ import {decodeModelResponse} from './model-download';
 import {PointerTap} from './pointer-tap';
 import {cameraTransitionDuration,easeInOutCubic,safeFocusDistance,transitionVisibility} from './camera-transition';
 import {SYSTEMS,type Atlas,type SceneState} from './anatomy';
-interface Props {atlas:Atlas;state:SceneState;preferredSelection?:string[];onSelect:(id:string)=>void;onProgress:(n:number)=>void;onError:(s:string)=>void}
-export default function AnatomyScene({atlas,state,preferredSelection=[],onSelect,onProgress,onError}:Props){
+export interface CameraPose {position:[number,number,number];target:[number,number,number]}
+export interface CameraNavigation {capture:()=>CameraPose;restore:(pose:CameraPose)=>void}
+interface Props {navigation:React.RefObject<CameraNavigation|null>;atlas:Atlas;state:SceneState;preferredSelection?:string[];onSelect:(id:string)=>void;onProgress:(n:number)=>void;onError:(s:string)=>void}
+export default function AnatomyScene({navigation,atlas,state,preferredSelection=[],onSelect,onProgress,onError}:Props){
  const host=useRef<HTMLDivElement>(null),latest=useRef(state),select=useRef(onSelect),preferred=useRef(preferredSelection);
  latest.current=state;select.current=onSelect;preferred.current=preferredSelection;
  useEffect(()=>{
@@ -38,6 +41,10 @@ export default function AnatomyScene({atlas,state,preferredSelection=[],onSelect
   const hover=document.createElement('div');hover.className='part-hover';hover.setAttribute('role','tooltip');hover.hidden=true;el.appendChild(hover);
   type Target={index:number;x:number;y:number;left:number;right:number;top:number;bottom:number};let targets:Target[]=[];
   const projected=new T.Vector3();
+  const withinBreakdown=(index:number)=>{
+   const s=latest.current;
+   return s.explode<=.1 || !s.explodeSelection?.length || s.explodeSelection.includes(atlas.parts[index].id);
+  };
   const findTarget=(x:number,y:number,radius:number)=>{
    let best=-1,score=Infinity;
    for(const t of targets){const dx=Math.max(t.left-x,0,x-t.right),dy=Math.max(t.top-y,0,y-t.bottom),distance=Math.hypot(dx,dy);if(distance>radius)continue;const candidate=distance+Math.hypot(t.x-x,t.y-y)*.025;if(candidate<score){score=candidate;best=t.index;}}
@@ -92,20 +99,26 @@ export default function AnatomyScene({atlas,state,preferredSelection=[],onSelect
   const resize=()=>{layoutKey='';lastState=null;renderer.setPixelRatio(Math.min(devicePixelRatio,el.clientWidth<768||el.clientHeight<600?1.5:2));camera.aspect=el.clientWidth/el.clientHeight;camera.updateProjectionMatrix();renderer.setSize(el.clientWidth,el.clientHeight);if(!flight&&!latest.current.isolate)applyPose(fitPose(latest.current.view,amount));};const observer=new ResizeObserver(resize);observer.observe(el);
   const raycaster=new T.Raycaster(),pointer=new T.Vector2(),tap=new PointerTap(),worldBox=new T.Box3(),hitPoint=new T.Vector3();
   const down=(e:PointerEvent)=>{cancelFlight();hover.hidden=true;tap.down(e.pointerId,e.clientX,e.clientY,e.pointerType==='touch'?12:5);};
-  const move=(e:PointerEvent)=>{tap.move(e.pointerId,e.clientX,e.clientY);if(e.buttons||amount<.5||e.pointerType==='touch'){hover.hidden=true;return;}const rect=el.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top,index=findTarget(x,y,12);hover.hidden=index<0;renderer.domElement.style.cursor=index<0?'grab':'pointer';if(index>=0){hover.textContent=atlas.parts[index].name;hover.style.left=`${Math.max(8,Math.min(x+14,el.clientWidth-260))}px`;hover.style.top=`${Math.max(8,Math.min(y+18,el.clientHeight-55))}px`;}};
+  const move=(e:PointerEvent)=>{tap.move(e.pointerId,e.clientX,e.clientY);if(e.buttons||amount<.5||e.pointerType==='touch'){hover.hidden=true;return;}const rect=el.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top,index=findTarget(x,y,12);hover.hidden=index<0;renderer.domElement.style.cursor=index<0?'grab':'pointer';if(index>=0){hover.textContent=anatomicalName(atlas.parts[index].name);hover.style.left=`${Math.max(8,Math.min(x+14,el.clientWidth-260))}px`;hover.style.top=`${Math.max(8,Math.min(y+18,el.clientHeight-55))}px`;}};
   const cancel=(e:PointerEvent)=>tap.cancel(e.pointerId);
   const up=(e:PointerEvent)=>{
    const validTap=tap.up(e.pointerId,e.clientX,e.clientY);if(!validTap||!ready)return;const rect=renderer.domElement.getBoundingClientRect();pointer.set((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1);raycaster.setFromCamera(pointer,camera);
    let nearest=Infinity,found=-1,preferredNearest=Infinity,preferredFound=-1;const preferredIds=new Set(preferred.current),hasSolid=atlas.parts.some((p,i)=>p.system!=='integumentary'&&data[i*4+3]>.5);
-   pickers.forEach((mesh,i)=>{if(!mesh||data[i*4+3]<.5||(hasSolid&&atlas.parts[i].system==='integumentary'))return;worldBox.copy(bounds[i]).translate(mesh.position);if(!raycaster.ray.intersectBox(worldBox,hitPoint))return;const hits=raycaster.intersectObject(mesh,false);if(!hits[0])return;const distance=hits[0].distance;if(distance<nearest){nearest=distance;found=i;}if(preferredIds.has(atlas.parts[i].id)&&distance<preferredNearest){preferredNearest=distance;preferredFound=i;}});
+   pickers.forEach((mesh,i)=>{if(!mesh||!withinBreakdown(i)||data[i*4+3]<.5||(hasSolid&&atlas.parts[i].system==='integumentary'))return;worldBox.copy(bounds[i]).translate(mesh.position);if(!raycaster.ray.intersectBox(worldBox,hitPoint))return;const hits=raycaster.intersectObject(mesh,false);if(!hits[0])return;const distance=hits[0].distance;if(distance<nearest){nearest=distance;found=i;}if(preferredIds.has(atlas.parts[i].id)&&distance<preferredNearest){preferredNearest=distance;preferredFound=i;}});
    if(preferredFound<0&&preferredIds.size)preferredFound=findPreferredScreenTarget(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?20:12);
    if(preferredFound>=0)found=preferredFound;
    if(found<0&&amount>.45)found=findTarget(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?24:16);if(found>=0){hover.hidden=true;select.current(atlas.parts[found].id);}
   };
   const wheel=()=>cancelFlight();renderer.domElement.addEventListener('pointerdown',down);renderer.domElement.addEventListener('pointermove',move);renderer.domElement.addEventListener('pointerup',up);renderer.domElement.addEventListener('pointercancel',cancel);renderer.domElement.addEventListener('wheel',wheel,{passive:true});
   const clock=new T.Clock();let lastExtent=-1;
+  let pendingPose:CameraPose|null=null;
+  navigation.current={
+   capture:()=>({position:camera.position.toArray(),target:controls.target.toArray()}),
+   restore:pose=>{pendingPose=pose;}
+  };
   const animate=()=>{
    if(disposed)return;frame=requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.05),s=latest.current;
+   if(pendingPose){amount=s.explode;lastState=null;flight=null;dirty=true;}
    const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.isolate!==s.isolate||lastState?.systemOpacity!==s.systemOpacity;
    const moving=Math.abs(amount-s.explode)>.0001,localExplosionActive=(s.explodeSelection?.length??0)>0&&s.explode>.01;
    if(moving){amount=T.MathUtils.damp(amount,s.explode,8,dt);dirty=true;}
@@ -138,13 +151,14 @@ export default function AnatomyScene({atlas,state,preferredSelection=[],onSelect
     }else if(lastIsolate){camera.clearViewOffset();startFlight(fitPose(s.view,amount),false);}
     lastIsolate=isolateKey;
    }
+   if(pendingPose){startFlight({position:new T.Vector3(...pendingPose.position),target:new T.Vector3(...pendingPose.target)},s.isolate);pendingPose=null;}
    if(flight){const elapsed=performance.now()-flight.started;const raw=flight.duration?Math.min(1,elapsed/flight.duration):1;flight.progress=raw;const eased=easeInOutCubic(raw);controls.target.lerpVectors(flight.fromTarget,flight.toTarget,eased);camera.position.lerpVectors(flight.fromPosition,flight.toPosition,eased);const arc=Math.sin(Math.PI*raw)*Math.min(.28,flight.fromPosition.distanceTo(flight.toPosition)*.08);camera.position.addScaledVector(camera.position.clone().sub(controls.target).normalize(),arc);controls.update();dirty=true;if(raw>=1||flight.cancelled){flight=null;lastState=null;}}
    controls.enableRotate=localExplosion||amount<.8;controls.mouseButtons.LEFT=localExplosion||amount<.8?T.MOUSE.ROTATE:T.MOUSE.PAN;controls.touches.ONE=localExplosion||amount<.8?T.TOUCH.ROTATE:T.TOUCH.PAN;ground.visible=platform.visible=ring.visible=innerRing.visible=amount<.5&&!s.isolate;controls.autoRotate=s.rotate&&!s.isolate&&amount<.4;controls.autoRotateSpeed=.65;controls.update();if(controls.autoRotate)dirty=true;
-   if(dirty){renderer.render(scene,camera);targets=[];if(amount>.45){const hasSolid=atlas.parts.some((p,i)=>p.system!=='integumentary'&&data[i*4+3]>.5);atlas.parts.forEach((p,i)=>{if(data[i*4+3]<.5||(hasSolid&&p.system==='integumentary'))return;let left=Infinity,right=-Infinity,top=Infinity,bottom=-Infinity;for(let corner=0;corner<8;corner++){projected.set(p.bounds[(corner&1)?1:0][0]+data[i*4],p.bounds[(corner&2)?1:0][1]+data[i*4+1],p.bounds[(corner&4)?1:0][2]+data[i*4+2]).project(camera);const x=(projected.x+1)*el.clientWidth/2,y=(1-projected.y)*el.clientHeight/2;left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);}projected.copy(centers[i]).add(new T.Vector3(data[i*4],data[i*4+1],data[i*4+2])).project(camera);if(projected.z< -1||projected.z>1)return;targets.push({index:i,x:(projected.x+1)*el.clientWidth/2,y:(1-projected.y)*el.clientHeight/2,left,right,top,bottom});});}dirty=false;}
+   if(dirty){renderer.render(scene,camera);targets=[];if(amount>.45){const hasSolid=atlas.parts.some((p,i)=>p.system!=='integumentary'&&data[i*4+3]>.5);atlas.parts.forEach((p,i)=>{if(!withinBreakdown(i)||data[i*4+3]<.5||(hasSolid&&p.system==='integumentary'))return;let left=Infinity,right=-Infinity,top=Infinity,bottom=-Infinity;for(let corner=0;corner<8;corner++){projected.set(p.bounds[(corner&1)?1:0][0]+data[i*4],p.bounds[(corner&2)?1:0][1]+data[i*4+1],p.bounds[(corner&4)?1:0][2]+data[i*4+2]).project(camera);const x=(projected.x+1)*el.clientWidth/2,y=(1-projected.y)*el.clientHeight/2;left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);}projected.copy(centers[i]).add(new T.Vector3(data[i*4],data[i*4+1],data[i*4+2])).project(camera);if(projected.z< -1||projected.z>1)return;targets.push({index:i,x:(projected.x+1)*el.clientWidth/2,y:(1-projected.y)*el.clientHeight/2,left,right,top,bottom});});}dirty=false;}
 
   };animate();
   const contextLost=(e:Event)=>{e.preventDefault();onError('The 3D session was paused by your device. Reload to continue.');};renderer.domElement.addEventListener('webglcontextlost',contextLost);
-  return()=>{disposed=true;abort.abort();cancelAnimationFrame(frame);observer.disconnect();renderer.domElement.removeEventListener('wheel',wheel);controls.dispose();geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());scene.traverse(o=>{if(o instanceof T.Mesh&&!geometries.includes(o.geometry)){o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});env.dispose();partTexture.dispose();selectionTexture.dispose();hover.remove();renderer.dispose();renderer.domElement.remove();};
+  return()=>{navigation.current=null;disposed=true;abort.abort();cancelAnimationFrame(frame);observer.disconnect();renderer.domElement.removeEventListener('wheel',wheel);controls.dispose();geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());scene.traverse(o=>{if(o instanceof T.Mesh&&!geometries.includes(o.geometry)){o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});env.dispose();partTexture.dispose();selectionTexture.dispose();hover.remove();renderer.dispose();renderer.domElement.remove();};
  },[atlas]);
  return <div className="scene" ref={host}/>;
 }

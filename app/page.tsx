@@ -1,3 +1,5 @@
+import {anatomicalName} from './atlas-index.mjs';
+import type {DialogueTurn} from './assistant';
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -22,7 +24,7 @@ import {
   Trophy,
   X,
 } from "lucide-react";
-import AnatomyScene from "./scene";
+import AnatomyScene, {type CameraNavigation,type CameraPose} from "./scene";
 import {
   DEFAULT_VISIBLE,
   SYSTEMS,
@@ -126,6 +128,21 @@ export default function Home() {
     [answers, setAnswers] = useState<
       Record<string, { answer: string; correct: boolean }>
     >({});
+  const navigation = useRef<CameraNavigation|null>(null);
+  const levels = useRef<{scene:SceneState; selected:ConceptEntry|null; rightOpen:boolean; pose?:CameraPose}[]>([]);
+  const rememberLevel = () => {
+    levels.current.push({scene, selected, rightOpen, pose:navigation.current?.capture()});
+  };
+  const restoreLevel = () => {
+    const parent = levels.current.pop();
+    if (!parent) return false;
+    setScene(current => ({...parent.scene, reset:current.reset + 1}));
+    setSelected(parent.selected);
+    setRightOpen(parent.rightOpen);
+    if(parent.pose) navigation.current?.restore(parent.pose);
+    return true;
+  };
+  const dialogue = useRef<DialogueTurn[]>([]);
   const [reply, setReply] = useState<AssistantReply>(emptyReply),
     [assistantInput, setAssistantInput] = useState(""),
     [assistantBusy, setAssistantBusy] = useState(false),
@@ -224,14 +241,16 @@ export default function Home() {
         event.preventDefault();
         assistantRef.current?.focus();
       }
-      if (event.key === "Escape") {
-        setLeftOpen(false);
-        setRightOpen(false);
+      if (event.key === "Escape" && !event.defaultPrevented && !event.repeat && !event.isComposing) {
+        event.preventDefault();
+        if (showAIConfig) setShowAIConfig(false);
+        else if (showIntro) dismissIntro();
+        else backOrCloseRightPanel();
       }
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, []);
+  });
 
   const conceptMap = useMemo(
     () => new Map(atlas?.concepts.map((c) => [c.id, c])),
@@ -253,7 +272,7 @@ export default function Home() {
     const raw = atlas.concepts
       .filter(
         (c) =>
-          c.name.toLowerCase().includes(q) || c.id.toLowerCase().includes(q),
+          anatomicalName(c.name).toLowerCase().includes(q) || c.name.toLowerCase().includes(q) || c.id.toLowerCase().includes(q),
       )
       .slice(0, 12)
       .map((c) => resolveConcept(atlas, c.id))
@@ -295,6 +314,7 @@ export default function Home() {
         : [];
 
   const resetScene = () => {
+    levels.current = [];
     setScene((current) => ({
       ...initialScene,
       visible: DEFAULT_VISIBLE,
@@ -330,6 +350,7 @@ export default function Home() {
   const applyActions = (actions: Action[]) => {
     if (!atlas) return;
     const valid = validateActions(atlas, actions);
+    if(valid.length) levels.current = [];
     let next = {
       ...scene,
       visible: [...scene.visible],
@@ -493,15 +514,16 @@ export default function Home() {
     }
     const part = partMap.get(partId);
     if (!part) return;
-    const core = resolveFreeClickConcept(atlas, partId);
+    if (scene.explode > 0.1) rememberLevel();
+    const core = scene.explode > 0.1 ? undefined : resolveFreeClickConcept(atlas, partId);
     setSelected(
       core ?? {
         id: part.conceptId,
-        zh: part.name,
+        zh: anatomicalName(part.name),
         en: part.name,
         system: part.system,
         synonyms: [],
-        summary: "该结构来自 BodyParts3D 原始网格，尚未进入核心中文审校词表。",
+        summary: "该结构对应 BodyParts3D 解剖模型。",
         source: "atlas",
       },
     );
@@ -525,6 +547,7 @@ export default function Home() {
     resetScene();
   };
   const selectSearch = (entry: ConceptEntry) => {
+    levels.current = [];
     showConcept(entry.id, true);
     setQuery("");
     setLeftOpen(false);
@@ -574,7 +597,12 @@ export default function Home() {
     }
     setAssistantBusy(true);
     setAssistantInput("");
-    const response = await askAssistant(message, aiConfig, atlas);
+    const previous = dialogue.current;
+    const response = await askAssistant(message, aiConfig, atlas, previous);
+    if (previous !== dialogue.current) { setAssistantBusy(false); return; }
+    if (response.mode === "live" && response.contextual) {
+      dialogue.current = [...previous, {question: message, answer: response.answer}].slice(-4);
+    }
     setReply(response);
     setAssistantMode(aiConfig && !response.error ? "live" : response.mode);
     applyActions(response.actions);
@@ -588,6 +616,7 @@ export default function Home() {
     }
   };
   const backOrCloseRightPanel = () => {
+    if (restoreLevel()) return;
     if (mode === "explore" && selected) {
       resetScene();
       return;
@@ -614,6 +643,7 @@ export default function Home() {
     <main className={`zhiti-app mode-${mode}`}>
       {atlas && (
         <AnatomyScene
+          navigation={navigation}
           atlas={atlas}
           state={{ ...scene, inspectorOpen: rightOpen }}
           preferredSelection={modelTrainingTargets}
@@ -658,6 +688,7 @@ export default function Home() {
                     : undefined
               }
               onClick={() => {
+                levels.current = [];
                 if (item.id === "knowledge" || item.id === "model") {
                   setMode("quiz");
                   setQuizView(item.id);
@@ -817,17 +848,16 @@ export default function Home() {
           <button
             key={`structure-breakdown-${explodeHintKey}`}
             className={explodeHintKey ? "explode-hint" : undefined}
-            onClick={() =>
-              setScene((current) => ({
+            onClick={() => {
+              if (scene.explode > 0.1 && restoreLevel()) return;
+              if (scene.explode <= 0.1) rememberLevel();
+              setScene(current => ({
                 ...current,
                 explode: current.explode > 0.1 ? 0 : 1,
-                explodeSelection:
-                  current.explode > 0.1
-                    ? current.explodeSelection
-                    : [...current.selected],
+                explodeSelection: current.explode > 0.1 ? [] : [...current.selected],
                 view: current.explode > 0.1 ? current.view : "front",
-              }))
-            }
+              }));
+            }}
           >
             <Layers3 size={16} />
             {scene.explode > 0.1
@@ -902,6 +932,7 @@ export default function Home() {
             scene={scene}
             onFocus={(id) => showConcept(id, true)}
             onClear={() => {
+              levels.current = [];
               setSelected(null);
               setScene((current) => ({
                 ...current,
@@ -1027,6 +1058,9 @@ export default function Home() {
           <MessageCircle size={16} />
           <div>
             <b>{reply.answer}</b>
+            {reply.citations.map((source,index) => (
+              <small key={index}>参考来源 · <a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></small>
+            ))}
             {reply.limitations.map((item) => (
               <small key={item}>{item}</small>
             ))}
@@ -1048,6 +1082,7 @@ export default function Home() {
         current={aiConfig}
         onClose={() => setShowAIConfig(false)}
         onSaved={(config) => {
+          dialogue.current = [];
           setAIConfig(config);
           setAssistantMode("live");
           setReply({
@@ -1057,6 +1092,7 @@ export default function Home() {
           });
         }}
         onCleared={() => {
+          dialogue.current = [];
           setAIConfig(null);
           setAssistantMode("demo");
           setAIPrompted(false);
@@ -1169,7 +1205,7 @@ function ExplorePanel({
             已验证模型映射
           </div>
           <h2>{selected.zh}</h2>
-          <p className="latin">{selected.en}</p>
+          <p className="latin">{selected.zh === selected.en ? "暂无中文译名 · 保留英文原名" : selected.en}</p>
           <p className="lead-copy">{selected.summary}</p>
           <div className="mapping-card">
             <div>
